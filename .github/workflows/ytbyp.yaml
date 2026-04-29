@@ -1,28 +1,14 @@
-name: Poo poo - Batch Download from URLs & Save to Repo
+name: Poo poo - Download from URLs & Save to Repo
 
 on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Space-separated list of URLs to download (or .txt file URL)'
+        description: 'Space-separated list of URLs to download'
         required: true
         type: string
-      batch_mode:
-        description: 'Batch processing mode'
-        required: false
-        default: 'sequential'
-        type: choice
-        options:
-          - sequential
-          - parallel
-          - url_file
-      parallel_jobs:
-        description: 'Number of parallel downloads (1-10, only for parallel mode)'
-        required: false
-        default: 3
-        type: number
       mode:
-        description: 'Output mode'
+        description: 'Download mode'
         required: false
         default: 'normal'
         type: choice
@@ -40,12 +26,12 @@ on:
         default: 'best'
         type: string
       output_name:
-        description: 'Custom output filename (use {title} for original)'
+        description: 'Custom output pattern (use {date} for date, {id} for video id, {title} for title)'
         required: false
-        default: '{title}'
+        default: '{date}_{id}'
         type: string
       convert_format:
-        description: 'Convert to format'
+        description: 'Convert to format (keep = no conversion)'
         required: false
         default: 'keep'
         type: choice
@@ -58,9 +44,22 @@ on:
           - m4a
           - wav
           - opus
+      batch_mode:
+        description: 'Batch processing mode'
+        required: false
+        default: 'sequential'
+        type: choice
+        options:
+          - sequential
+          - parallel
+      parallel_jobs:
+        description: 'Number of parallel downloads (1-5, only for parallel mode)'
+        required: false
+        default: 3
+        type: number
 
 jobs:
-  batch-downloader:
+  poo-poo-saver:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -77,115 +76,144 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install yt-dlp and tools
+      - name: Install yt-dlp and other tools
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 zip ffmpeg python3-pip parallel
           pip3 install yt-dlp --break-system-packages
 
-      - name: Prepare URL list
-        run: |
-          BATCH_MODE="${{ github.event.inputs.batch_mode }}"
-          URLS="${{ github.event.inputs.urls }}"
-          
-          if [ "$BATCH_MODE" = "url_file" ]; then
-            echo "📄 Downloading URL list from: $URLS"
-            curl -L -o url_list.txt "$URLS"
-            echo "URLs loaded from file:"
-            cat url_list.txt
-            # Convert to space-separated list
-            URLS=$(cat url_list.txt | tr '\n' ' ')
-          fi
-          
-          # Save URLS to environment
-          echo "URLS_LIST=$URLS" >> $GITHUB_ENV
-          echo "BATCH_MODE=$BATCH_MODE" >> $GITHUB_ENV
-
-      - name: Download function (for parallel execution)
-        run: |
-          # Create download script for parallel
-          cat > /tmp/download_one.sh << 'EOF'
-          #!/bin/bash
-          URL="$1"
-          OUTPUT_NAME="$2"
-          CONVERT_FORMAT="$3"
-          YT_FORMAT="$4"
-          
-          echo "🚀 Starting: $URL"
-          
-          if [[ "$URL" =~ (youtube\.com|youtu\.be) ]]; then
-            CMD="yt-dlp -f \"$YT_FORMAT\" --no-playlist --retries 5"
-            
-            if [ "$CONVERT_FORMAT" != "keep" ]; then
-              if [[ "$CONVERT_FORMAT" == "mp3" || "$CONVERT_FORMAT" == "m4a" || "$CONVERT_FORMAT" == "wav" || "$CONVERT_FORMAT" == "opus" ]]; then
-                CMD="$CMD --extract-audio --audio-format $CONVERT_FORMAT"
-              else
-                CMD="$CMD --recode-video $CONVERT_FORMAT"
-              fi
-            else
-              CMD="$CMD --merge-output-format mkv"
-            fi
-            
-            if [[ "$OUTPUT_NAME" == *"{title}"* ]]; then
-              CMD="$CMD -o \"${OUTPUT_NAME}.%(ext)s\""
-            else
-              CMD="$CMD -o \"${OUTPUT_NAME}_%(title)s.%(ext)s\""
-            fi
-            
-            cd tmp_downloads
-            eval $CMD "$URL" 2>&1 | head -20
-            cd ..
-          else
-            FILENAME=$(basename "$URL")
-            aria2c --split=2 --max-connection-per-server=2 --dir="tmp_downloads" --out="$FILENAME" "$URL"
-          fi
-          
-          echo "✅ Finished: $URL"
-          EOF
-          
-          chmod +x /tmp/download_one.sh
-
-      - name: Run batch downloads
+      - name: Poo poo Downloader
         run: |
           MODE="${{ github.event.inputs.mode }}"
+          URLS="${{ github.event.inputs.urls }}"
           SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
           YT_FORMAT="${{ github.event.inputs.youtube_format }}"
-          OUTPUT_NAME="${{ github.event.inputs.output_name }}"
+          OUTPUT_PATTERN="${{ github.event.inputs.output_name }}"
           CONVERT_FORMAT="${{ github.event.inputs.convert_format }}"
+          BATCH_MODE="${{ github.event.inputs.batch_mode }}"
           PARALLEL_JOBS="${{ github.event.inputs.parallel_jobs }}"
           SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
 
           mkdir -p downloads tmp_downloads
 
-          echo "📦 Batch mode: $BATCH_MODE"
-          
-          if [ "$BATCH_MODE" = "parallel" ]; then
-            # Parallel downloads
-            echo "⚡ Downloading $PARALLEL_JOBS files in parallel..."
-            
-            # Convert space-separated to line-separated for parallel
-            echo $URLS_LIST | tr ' ' '\n' > /tmp/urls.txt
-            
-            cat /tmp/urls.txt | parallel -j $PARALLEL_JOBS \
-              /tmp/download_one.sh {} "$OUTPUT_NAME" "$CONVERT_FORMAT" "$YT_FORMAT"
+          # Get current date for formatting
+          CURRENT_DATE=$(date +%Y%m%d_%H%M%S)
+
+          # Create download function
+          download_one() {
+            URL="$1"
+            DATE="$2"
+            echo "Processing: $URL"
+
+            if [[ "$URL" =~ (youtube\.com|youtu\.be) ]]; then
+              echo "🎬 YouTube video detected!"
               
-          elif [ "$BATCH_MODE" = "sequential" ]; then
-            # Sequential downloads (original behavior)
-            echo "🐢 Sequential download mode..."
-            
-            for URL in $URLS_LIST; do
-              /tmp/download_one.sh "$URL" "$OUTPUT_NAME" "$CONVERT_FORMAT" "$YT_FORMAT"
+              # First, extract video ID and title
+              echo "📝 Fetching video metadata..."
+              
+              # Get video ID from URL
+              if [[ "$URL" =~ youtube\.com/watch\?v=([a-zA-Z0-9_-]+) ]]; then
+                VIDEO_ID="${BASH_REMATCH[1]}"
+              elif [[ "$URL" =~ youtu\.be/([a-zA-Z0-9_-]+) ]]; then
+                VIDEO_ID="${BASH_REMATCH[1]}"
+              elif [[ "$URL" =~ youtube\.com/shorts/([a-zA-Z0-9_-]+) ]]; then
+                VIDEO_ID="${BASH_REMATCH[1]}"
+              else
+                VIDEO_ID="unknown"
+              fi
+              
+              # Get video title using yt-dlp
+              VIDEO_TITLE=$(yt-dlp --get-title --no-playlist "$URL" 2>/dev/null | sed 's/[^a-zA-Z0-9_-]/_/g' | cut -c1-50)
+              
+              # Build output filename based on pattern
+              OUTPUT_FILENAME="$OUTPUT_PATTERN"
+              OUTPUT_FILENAME="${OUTPUT_FILENAME//\{date\}/$DATE}"
+              OUTPUT_FILENAME="${OUTPUT_FILENAME//\{id\}/$VIDEO_ID}"
+              OUTPUT_FILENAME="${OUTPUT_FILENAME//\{title\}/$VIDEO_TITLE}"
+              
+              # Fallback if filename is empty
+              if [ -z "$OUTPUT_FILENAME" ] || [ "$OUTPUT_FILENAME" = "$OUTPUT_PATTERN" ]; then
+                OUTPUT_FILENAME="${DATE}_${VIDEO_ID}"
+              fi
+              
+              echo "📝 Output will be: $OUTPUT_FILENAME"
+              
+              cd tmp_downloads
+
+              # Build base yt-dlp command
+              CMD="yt-dlp -f \"$YT_FORMAT\" --no-playlist --retries 5"
+
+              # Add conversion options
+              if [ "$CONVERT_FORMAT" != "keep" ]; then
+                if [[ "$CONVERT_FORMAT" == "mp3" || "$CONVERT_FORMAT" == "m4a" || "$CONVERT_FORMAT" == "wav" || "$CONVERT_FORMAT" == "opus" ]]; then
+                  CMD="$CMD --extract-audio --audio-format $CONVERT_FORMAT"
+                  OUTPUT_EXT="$CONVERT_FORMAT"
+                else
+                  CMD="$CMD --recode-video $CONVERT_FORMAT"
+                  OUTPUT_EXT="$CONVERT_FORMAT"
+                fi
+              else
+                CMD="$CMD --merge-output-format mkv"
+                OUTPUT_EXT="mkv"
+              fi
+
+              # Set output template with our custom name
+              CMD="$CMD -o \"$OUTPUT_FILENAME.$OUTPUT_EXT\""
+
+              # Execute
+              if eval $CMD "$URL"; then
+                echo "✅ Download successful: $OUTPUT_FILENAME.$OUTPUT_EXT"
+                
+                # Rename if yt-dlp added extra stuff (like .webm)
+                if [ -f "$OUTPUT_FILENAME.$OUTPUT_EXT" ]; then
+                  # Already correct name
+                  true
+                elif [ -f "$OUTPUT_FILENAME.webm" ] && [ "$OUTPUT_EXT" != "webm" ]; then
+                  mv "$OUTPUT_FILENAME.webm" "$OUTPUT_FILENAME.$OUTPUT_EXT"
+                elif [ -f "$OUTPUT_FILENAME.mp4" ] && [ "$OUTPUT_EXT" != "mp4" ]; then
+                  mv "$OUTPUT_FILENAME.mp4" "$OUTPUT_FILENAME.$OUTPUT_EXT"
+                elif [ -f "$OUTPUT_FILENAME.mkv" ] && [ "$OUTPUT_EXT" != "mkv" ]; then
+                  mv "$OUTPUT_FILENAME.mkv" "$OUTPUT_FILENAME.$OUTPUT_EXT"
+                fi
+              else
+                echo "⚠️ Standard failed, trying audio-only..."
+                FALLBACK_CMD="yt-dlp -f bestaudio --extract-audio --audio-format mp3 --no-playlist --retries 5"
+                FALLBACK_CMD="$FALLBACK_CMD -o \"${OUTPUT_FILENAME}.mp3\""
+                eval $FALLBACK_CMD "$URL"
+              fi
+              cd ..
+            else
+              FILENAME=$(basename "$URL")
+              echo "📁 Direct download: $FILENAME"
+              aria2c \
+                --split=2 \
+                --max-connection-per-server=2 \
+                --min-split-size=90M \
+                --dir="tmp_downloads" \
+                --out="$FILENAME" \
+                "$URL"
+            fi
+          }
+
+          export -f download_one
+          export YT_FORMAT OUTPUT_PATTERN CONVERT_FORMAT CURRENT_DATE
+
+          # Run downloads based on batch mode
+          if [ "$BATCH_MODE" = "parallel" ]; then
+            echo "⚡ Parallel mode with $PARALLEL_JOBS jobs..."
+            # Export for parallel
+            export -f download_one
+            echo "$URLS" | tr ' ' '\n' | parallel -j "$PARALLEL_JOBS" download_one {} "$CURRENT_DATE"
+          else
+            echo "🐢 Sequential mode..."
+            for URL in $URLS; do
+              download_one "$URL" "$CURRENT_DATE"
             done
           fi
 
-      - name: Process outputs (zip/split)
-        run: |
-          MODE="${{ github.event.inputs.mode }}"
-          SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
-          SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
-
+          # File processing (ZIP or Split)
           if [ "$MODE" = "zip" ]; then
-            ARCHIVE_NAME="downloads/batch_archive_$(date +%Y%m%d_%H%M%S).zip"
+            ARCHIVE_NAME="downloads/poo_poo_archive_$(date +%Y%m%d_%H%M%S).zip"
             echo "📦 Creating zip archive: $ARCHIVE_NAME"
             zip -j "$ARCHIVE_NAME" tmp_downloads/* 2>/dev/null || true
             rm -rf tmp_downloads
@@ -196,7 +224,7 @@ jobs:
               BASENAME=$(basename "$FILE")
 
               if [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
-                echo "✂️ Splitting $BASENAME ($(( SIZE / 1024 / 1024 ))MB)"
+                echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting"
                 zip -0 -s "${SPLIT_THRESHOLD_MB}m" "downloads/${BASENAME}.zip" -j "$FILE"
               else
                 cp "$FILE" "downloads/$BASENAME"
@@ -217,7 +245,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "[Poo poo] Batch download $(date +%Y%m%d_%H%M%S) [skip ci]"
+          git commit -m "[Poo poo] Add downloaded files [skip ci]"
           git pull --rebase origin "$BRANCH" || true
           git push origin HEAD:"$BRANCH"
-          echo "🎉 Batch download complete!"
+          echo "🎉 Files pushed to repository!"
